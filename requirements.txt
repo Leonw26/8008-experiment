@@ -1,0 +1,11 @@
+fastprogress
+joblib
+lightgbm
+matplotlib
+numpy
+pandas
+plotly
+scikit-learn
+seaborn
+torch
+tqdm
