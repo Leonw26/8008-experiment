@@ -1,4 +1,3 @@
-dataset/
 # Python & Data ignores
 __pycache__/
 *.pyc
