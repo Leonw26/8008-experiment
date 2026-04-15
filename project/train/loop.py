@@ -3,6 +3,7 @@ import numpy as np
 from torch.optim import Adam
 from torch.nn.utils import clip_grad_norm_
 import torch.nn.functional as F
+from constants import DEFAULT_GRAD_CLIP_NORM, DEFAULT_LEARNING_RATE, DEFAULT_LOSS_ALPHA, DEFAULT_LOSS_STRATEGY
 from model.lstm import DemandPredictor
 from solver.abca import ABCASolver
 from environment.inventory import InventoryEnvironment
@@ -54,6 +55,59 @@ def compute_prediction_losses(y_pred_flat: torch.Tensor, true_demand_tensor: tor
     raw_mse_loss = F.mse_loss(y_pred_flat, safe_true_demand)
     return pred_loss, raw_mse_loss
 
+def build_wandb_config(
+    dataloader,
+    predictor: DemandPredictor,
+    solver: ABCASolver,
+    env: InventoryEnvironment,
+    surrogate: SurrogateModel,
+    epochs: int,
+    device: torch.device,
+    exp_name: str,
+    learning_rate: float,
+    loss_strategy: str,
+    loss_alpha: float,
+    grad_clip_norm: float
+):
+    """
+    汇总关键实验配置，便于在 wandb 中复现实验设置。
+    """
+    dataset = getattr(dataloader, "dataset", None)
+    surrogate_regressor = getattr(surrogate, "model", None)
+    surrogate_params = surrogate_regressor.get_params() if hasattr(surrogate_regressor, "get_params") else {}
+
+    config = {
+        "exp_name": exp_name,
+        "epochs": epochs,
+        "batch_size": getattr(dataloader, "batch_size", None),
+        "device": str(device),
+        "learning_rate": learning_rate,
+        "loss_strategy": loss_strategy,
+        "loss_alpha": loss_alpha,
+        "grad_clip_norm": grad_clip_norm,
+        "dataset_mode": getattr(dataset, "mode", None),
+        "seq_len": getattr(dataset, "seq_len", None),
+        "penalty_coef": getattr(dataset, "penalty_coef", None),
+        "predictor_model": predictor.__class__.__name__,
+        "predictor_hidden_size": getattr(predictor, "hidden_size", None),
+        "predictor_num_layers": getattr(predictor, "num_layers", None),
+        "predictor_use_category_embedding": getattr(predictor, "use_category_embedding", None),
+        "solver_model": solver.__class__.__name__,
+        "solver_max_iter": getattr(solver, "max_iter", None),
+        "solver_pop_size": getattr(solver, "pop_size", None),
+        "solver_limit": getattr(solver, "limit", None),
+        "environment_model": env.__class__.__name__,
+        "surrogate_model": surrogate_regressor.__class__.__name__ if surrogate_regressor is not None else surrogate.__class__.__name__,
+        "surrogate_max_iter": surrogate_params.get("max_iter"),
+        "surrogate_learning_rate": surrogate_params.get("learning_rate"),
+        "surrogate_max_depth": surrogate_params.get("max_depth"),
+        "surrogate_max_leaf_nodes": surrogate_params.get("max_leaf_nodes"),
+        "surrogate_min_samples_leaf": surrogate_params.get("min_samples_leaf"),
+        "surrogate_l2_regularization": surrogate_params.get("l2_regularization"),
+        "surrogate_random_state": surrogate_params.get("random_state")
+    }
+    return {key: value for key, value in config.items() if value is not None}
+
 def train_predict_and_optimize(
     dataloader, 
     predictor: DemandPredictor, 
@@ -64,10 +118,10 @@ def train_predict_and_optimize(
     device: torch.device = torch.device('cpu'),
     report_to: str = "wandb",
     exp_name: str = "8008",
-    learning_rate: float = 1e-5,
-    loss_strategy: str = "balanced_sum",
-    loss_alpha: float = 0.5,
-    grad_clip_norm: float = 1.0
+    learning_rate: float = DEFAULT_LEARNING_RATE,
+    loss_strategy: str = DEFAULT_LOSS_STRATEGY,
+    loss_alpha: float = DEFAULT_LOSS_ALPHA,
+    grad_clip_norm: float = DEFAULT_GRAD_CLIP_NORM
 ):
     """
     [Step 6] 端到端 Predict-and-Optimize 训练循环 (C同学负责)
@@ -76,9 +130,24 @@ def train_predict_and_optimize(
     use_wandb = (report_to.lower() == "wandb")
     if use_wandb:
         import wandb
+        config = build_wandb_config(
+            dataloader=dataloader,
+            predictor=predictor,
+            solver=solver,
+            env=env,
+            surrogate=surrogate,
+            epochs=epochs,
+            device=device,
+            exp_name=exp_name,
+            learning_rate=learning_rate,
+            loss_strategy=loss_strategy,
+            loss_alpha=loss_alpha,
+            grad_clip_norm=grad_clip_norm
+        )
         wandb.init(
             project=exp_name,
-            name=f"run_epo{epochs}_bs{dataloader.batch_size}_{loss_strategy}_lr{learning_rate:.0e}"
+            name=f"run_epo{epochs}_bs{dataloader.batch_size}_{loss_strategy}_lr{learning_rate:.0e}",
+            config=config
         )
         
     # 降低学习率，防止在剧烈波动的梯度中“翻车”
@@ -201,7 +270,7 @@ def train_predict_and_optimize(
                 pred_loss, raw_mse_loss = compute_prediction_losses(y_pred_flat, true_demand_tensor)
                 
                 # 将业务成本损失和预测损失拆开构造，便于切换训练方案和单独监控。
-                total_loss, aux_metrics = build_total_loss(
+                total_loss, _ = build_total_loss(
                     cost_loss=cost_loss,
                     pred_loss=pred_loss,
                     loss_strategy=loss_strategy,
@@ -241,11 +310,6 @@ def train_predict_and_optimize(
                         "cost_loss": cost_loss.item(),
                         "pred_loss": pred_loss.item(),
                         "mse_loss": raw_mse_loss.item(),
-                        "scaled_cost_loss": aux_metrics["scaled_cost_loss"].item(),
-                        "scaled_pred_loss": aux_metrics["scaled_pred_loss"].item(),
-                        "ema_total_loss": ema_total_loss,
-                        "ema_cost_loss": ema_cost_loss,
-                        "ema_pred_loss": ema_pred_loss,
                         "mean_true_cost": true_costs_np.mean(),
                         "mean_y_pred": y_pred_np.mean(),
                         "mean_abs_grad": mean_grad

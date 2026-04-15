@@ -7,38 +7,24 @@ from typing import Tuple
 
 import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from constants import (
+    ANNUAL_HOLDING_COST_RATE,
+    DEFAULT_FALLBACK_SELL_PRICE,
+    DEFAULT_PENALTY_COEF,
+    FIXED_ORDERING_COST,
+    HISTORY_WINDOW_DAYS,
+    PROFIT_MARGIN_RATE,
+    WEEKS_PER_YEAR,
+)
 from interfaces import SKUCostParams
 from data.category import compute_adi, compute_cv2, classify_type
-
-# 历史窗口长度: 使用过去 28 天销量序列来预测下一天需求。
-HISTORY_WINDOW_DAYS = 28
-
-# ==============================================================================
-# 全局业务成本参数配置 (Baseline 设定)
-# ==============================================================================
-# 利润率 (Margin Rate): 用于从真实售价推算进货成本。35% 意味着进价是售价的 65%
-PROFIT_MARGIN_RATE = 0.35
-
-# 年库存成本率 (Annual Holding Cost Rate): 每年存放一件商品的成本占其进货价的比例
-# 在数据加载时会被转换为周成本 (除以 52)
-ANNUAL_HOLDING_COST_RATE = 0.20
-
-# 固定订货成本 (Fixed Ordering Cost): 每次发起采购订单的固定物流/人工成本
-FIXED_ORDERING_COST = 5.0
-
-# 缺货惩罚乘数 (Stockout Penalty Multiplier): 
-# 严格的 Baseline 缺货成本仅等于丢失的毛利。
-# 但在端到端模型中，为了防止模型因为进货风险高而完全不进货(预测全为0)，
-# 我们允许在此处人为放大缺货惩罚(加上声誉损失)。设为 0.0 即代表严格对齐 Baseline。
-REPUTATION_PENALTY_MULTIPLIER = 10.0
-# ==============================================================================
 
 class M5InventoryDataset(Dataset):
     """
     M5 沃尔玛库存数据集加载器
     负责读取特征并返回: (features, true_demand, cost_params)
     """
-    def __init__(self, data_path: str, mode: str = 'train', seq_len: int = HISTORY_WINDOW_DAYS, penalty_coef: float = 10.0):
+    def __init__(self, data_path: str, mode: str = 'train', seq_len: int = HISTORY_WINDOW_DAYS, penalty_coef: float = DEFAULT_PENALTY_COEF):
         """
         Args:
             data_path: dataset 文件夹路径 (例如: '../dataset')
@@ -130,17 +116,17 @@ class M5InventoryDataset(Dataset):
         
         # 3. 构造业务成本参数 (基于 Baseline 的统一设定)
         # 获取该 SKU 在该门店的历史平均价格 (作为售价)
-        sell_price = self.avg_prices.get((item_id, store_id), 5.0)
+        sell_price = self.avg_prices.get((item_id, store_id), DEFAULT_FALLBACK_SELL_PRICE)
         
         # 进货价(成本) = 售价 * (1 - 利润率)
         p_i = sell_price * (1 - PROFIT_MARGIN_RATE)
         
         # 持仓成本 = (进货价 * 年库存成本率) / 52周
-        c_h = p_i * ANNUAL_HOLDING_COST_RATE / 52.0
+        c_h = p_i * ANNUAL_HOLDING_COST_RATE / WEEKS_PER_YEAR
         
         # 缺货成本(c_u): 卖不出去损失的利润 + 人为加上的声誉惩罚 (默认=0，即严格 Baseline)
         lost_margin = sell_price - p_i
-        reputation_penalty = sell_price * REPUTATION_PENALTY_MULTIPLIER
+        reputation_penalty = sell_price * self.penalty_coef
         c_u = lost_margin + reputation_penalty
         
         # 固定订货成本
@@ -171,7 +157,7 @@ def get_dataloader(
     data_path: str,
     batch_size: int = 32,
     mode: str = 'train',
-    penalty_coef: float = 10.0,
+    penalty_coef: float = DEFAULT_PENALTY_COEF,
     seq_len: int = HISTORY_WINDOW_DAYS
 ) -> DataLoader:
     """

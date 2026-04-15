@@ -3,7 +3,20 @@ os.environ['KMP_DUPLICATE_LIB_OK'] = 'True'
 os.environ['OMP_NUM_THREADS'] = '1'
 import argparse
 import torch
-from data.dataset import get_dataloader, HISTORY_WINDOW_DAYS
+from constants import (
+    DEFAULT_BATCH_SIZE,
+    DEFAULT_EPOCHS,
+    DEFAULT_EXP_NAME,
+    DEFAULT_GRAD_CLIP_NORM,
+    DEFAULT_LEARNING_RATE,
+    DEFAULT_LOSS_ALPHA,
+    DEFAULT_LOSS_STRATEGY,
+    DEFAULT_PENALTY_COEF,
+    DEFAULT_SOLVER_MAX_ITER,
+    DEFAULT_SOLVER_POP_SIZE,
+    HISTORY_WINDOW_DAYS,
+)
+from data.dataset import get_dataloader
 from model.lstm import DemandPredictor
 from solver.abca import ABCASolver
 from environment.inventory import InventoryEnvironment
@@ -16,20 +29,20 @@ def main():
     负责初始化所有模块并启动端到端训练流水线。
     """
     parser = argparse.ArgumentParser(description="End-to-End Predict-and-Optimize Training")
-    parser.add_argument('--epochs', type=int, default=5, help='epochs数量 (default: 5)')
+    parser.add_argument('--epochs', type=int, default=DEFAULT_EPOCHS, help=f'epochs数量 (default: {DEFAULT_EPOCHS})')
     parser.add_argument('--report_to', type=str, default='none', help='是否上报指标到特定平台，如 "wandb"')
-    parser.add_argument('--exp_name', type=str, default='8008', help='实验/项目名称，当 report_to=wandb 时作为 wandb project name')
-    parser.add_argument('--penalty_coef', type=float, default=10.0, help='缺货声誉惩罚系数，基于售价的倍数 (default: 10.0)')
-    parser.add_argument('--learning_rate', type=float, default=1e-5, help='预测模型学习率 (default: 1e-5)')
+    parser.add_argument('--exp_name', type=str, default=DEFAULT_EXP_NAME, help=f'实验/项目名称，当 report_to=wandb 时作为 wandb project name (default: {DEFAULT_EXP_NAME})')
+    parser.add_argument('--penalty_coef', type=float, default=DEFAULT_PENALTY_COEF, help=f'缺货声誉惩罚系数，基于售价的倍数 (default: {DEFAULT_PENALTY_COEF})')
+    parser.add_argument('--learning_rate', type=float, default=DEFAULT_LEARNING_RATE, help=f'预测模型学习率 (default: {DEFAULT_LEARNING_RATE})')
     parser.add_argument(
         '--loss_strategy',
         type=str,
-        default='balanced_sum',
+        default=DEFAULT_LOSS_STRATEGY,
         choices=['weighted_sum', 'balanced_sum'],
         help='loss方案: weighted_sum 或 balanced_sum'
     )
-    parser.add_argument('--loss_alpha', type=float, default=0.5, help='预测损失的权重系数 (default: 0.5)')
-    parser.add_argument('--grad_clip_norm', type=float, default=1.0, help='参数梯度裁剪阈值 (default: 1.0)')
+    parser.add_argument('--loss_alpha', type=float, default=DEFAULT_LOSS_ALPHA, help=f'预测损失的权重系数 (default: {DEFAULT_LOSS_ALPHA})')
+    parser.add_argument('--grad_clip_norm', type=float, default=DEFAULT_GRAD_CLIP_NORM, help=f'参数梯度裁剪阈值 (default: {DEFAULT_GRAD_CLIP_NORM})')
     args = parser.parse_args()
 
     print("Initializing Project Components...")
@@ -44,7 +57,7 @@ def main():
     dataset_path = os.path.join(os.path.dirname(base_dir), 'dataset')
     dataloader = get_dataloader(
         data_path=dataset_path,
-        batch_size=128,
+        batch_size=DEFAULT_BATCH_SIZE,
         penalty_coef=args.penalty_coef,
         seq_len=HISTORY_WINDOW_DAYS
     )
@@ -55,7 +68,7 @@ def main():
     predictor = DemandPredictor(input_size=1, hidden_size=64, output_size=1).to(device)
     
     # 3. 初始化求解器与环境 (B同学负责)
-    solver = ABCASolver(max_iter=50, pop_size=30)
+    solver = ABCASolver(max_iter=DEFAULT_SOLVER_MAX_ITER, pop_size=DEFAULT_SOLVER_POP_SIZE)
     env = InventoryEnvironment()
     
     # 4. 初始化代理模型 (C同学负责)
