@@ -30,7 +30,7 @@ class M5InventoryDataset(Dataset):
             data_path: dataset 文件夹路径 (例如: '../dataset')
             mode: 'train' 或 'test'
             seq_len: 历史窗口长度 (默认使用过去 28 天的销量作为特征)
-            penalty_coef: 缺货声誉惩罚系数 (基于售价的倍数)
+            penalty_coef: 缺货额外惩罚系数 (基于售价的倍数)，默认 0.0 以对齐 baseline 成本口径
         """
         self.data_path = data_path
         self.mode = mode
@@ -114,17 +114,17 @@ class M5InventoryDataset(Dataset):
         true_demand_np = np.float32(row[target_col])
         true_demand = torch.tensor([true_demand_np], dtype=torch.float32)
         
-        # 3. 构造业务成本参数 (基于 Baseline 的统一设定)
+        # 3. 构造业务成本参数 (优先对齐 baseline notebook 的统一成本口径)
         # 获取该 SKU 在该门店的历史平均价格 (作为售价)
         sell_price = self.avg_prices.get((item_id, store_id), DEFAULT_FALLBACK_SELL_PRICE)
         
         # 进货价(成本) = 售价 * (1 - 利润率)
         p_i = sell_price * (1 - PROFIT_MARGIN_RATE)
         
-        # 持仓成本 = (进货价 * 年库存成本率) / 52周
-        c_h = p_i * ANNUAL_HOLDING_COST_RATE / WEEKS_PER_YEAR
+        # 持仓成本 = (售价 * 年库存成本率) / 52周，对齐参考 notebook 中的 c_h 定义
+        c_h = sell_price * ANNUAL_HOLDING_COST_RATE / WEEKS_PER_YEAR
         
-        # 缺货成本(c_u): 卖不出去损失的利润 + 人为加上的声誉惩罚 (默认=0，即严格 Baseline)
+        # 缺货成本(c_u): 默认等于毛利损失；可通过 penalty_coef 增加额外业务惩罚
         lost_margin = sell_price - p_i
         reputation_penalty = sell_price * self.penalty_coef
         c_u = lost_margin + reputation_penalty
@@ -158,7 +158,8 @@ def get_dataloader(
     batch_size: int = 32,
     mode: str = 'train',
     penalty_coef: float = DEFAULT_PENALTY_COEF,
-    seq_len: int = HISTORY_WINDOW_DAYS
+    seq_len: int = HISTORY_WINDOW_DAYS,
+    shuffle: bool = None
 ) -> DataLoader:
     """
     获取 DataLoader
@@ -180,5 +181,6 @@ def get_dataloader(
         raise FileNotFoundError(f"【严重错误】未找到真实数据集文件: {sales_path}。请确保已下载并放置了正确的 M5 数据集 (sales_train_evaluation.csv 等)。")
 
     dataset = M5InventoryDataset(data_path, mode=mode, seq_len=seq_len, penalty_coef=penalty_coef)
-        
-    return DataLoader(dataset, batch_size=batch_size, shuffle=True, collate_fn=custom_collate)
+    effective_shuffle = (mode == 'train') if shuffle is None else shuffle
+    
+    return DataLoader(dataset, batch_size=batch_size, shuffle=effective_shuffle, collate_fn=custom_collate)

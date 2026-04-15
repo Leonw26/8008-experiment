@@ -25,7 +25,8 @@ ANNUAL_HOLDING_COST_RATE = 0.20
 # 每次下单都会产生的固定成本。
 FIXED_ORDERING_COST = 5.0
 # 默认缺货惩罚系数，可被命令行参数覆盖。
-DEFAULT_PENALTY_COEF = 10.0
+# 设为 0.0 时，对齐 baseline notebook 中 c_u = sell_price * 0.35 的成本口径。
+DEFAULT_PENALTY_COEF = 0.0
 # 保留该别名，兼容旧代码中的命名习惯。
 REPUTATION_PENALTY_MULTIPLIER = DEFAULT_PENALTY_COEF
 
@@ -44,6 +45,10 @@ DEFAULT_LEARNING_RATE = 1e-5
 DEFAULT_LOSS_STRATEGY = "balanced_sum"
 # 预测损失在总损失中的默认权重。
 DEFAULT_LOSS_ALPHA = 0.5
+# PAO 的代理服务率目标，低于该阈值时触发惩罚。
+DEFAULT_SERVICE_LEVEL_TARGET = 0.95
+# PAO 的服务率惩罚权重，用于抑制零订货塌缩。
+DEFAULT_SERVICE_PENALTY_WEIGHT = 8.0
 # 梯度裁剪默认阈值。
 DEFAULT_GRAD_CLIP_NORM = 1.0
 # ABCA 求解器默认最大迭代次数。

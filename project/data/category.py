@@ -1,6 +1,13 @@
 import numpy as np
 import pandas as pd
 
+CATEGORY_LABELS = {
+    0: "Smooth",
+    1: "Erratic",
+    2: "Intermittent",
+    3: "Lumpy",
+}
+
 def compute_adi(x):
     """
     计算平均需求间隔 (Average Demand Interval)
@@ -34,3 +41,9 @@ def classify_type(adi, cv2):
         return 2 # "intermittent"
     else:
         return 3 # "lumpy"
+
+def get_category_name(category_idx):
+    """
+    将类别索引转换为可读的分段名称，便于做 segmentation 成本报表。
+    """
+    return CATEGORY_LABELS.get(int(category_idx), "Unknown")

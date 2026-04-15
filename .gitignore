@@ -9,3 +9,4 @@ env/
 *.png
 *.egg-info/
 wandb/
+results/
