@@ -9,7 +9,7 @@
 # 数据相关常量
 # ==============================================================================
 # 历史输入窗口长度，表示用过去多少天的数据预测下一天需求。
-HISTORY_WINDOW_DAYS = 28
+HISTORY_WINDOW_DAYS = 7
 # 年持有成本折算为周成本时使用。
 WEEKS_PER_YEAR = 52.0
 # 缺失售价时使用的兜底价格。
@@ -25,7 +25,7 @@ ANNUAL_HOLDING_COST_RATE = 0.20
 # 每次下单都会产生的固定成本。
 FIXED_ORDERING_COST = 5.0
 # 默认缺货惩罚系数，可被命令行参数覆盖。
-DEFAULT_PENALTY_COEF = 0.0
+DEFAULT_PENALTY_COEF = 10.0
 # 保留该别名，兼容旧代码中的命名习惯。
 REPUTATION_PENALTY_MULTIPLIER = DEFAULT_PENALTY_COEF
 
