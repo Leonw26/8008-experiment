@@ -50,3 +50,4 @@ class EnvironmentOutput:
     shortage_costs: np.ndarray  # 缺货成本分量。形状: (batch_size, )。数据类型: float32
     order_costs: np.ndarray     # 固定订货成本分量。形状: (batch_size, )。数据类型: float32
     fulfilled_demand: np.ndarray # 满足的需求量。形状: (batch_size, )。数据类型: float32
+    I_curr: np.ndarray          # 真实期末库存。形状: (batch_size, )。数据类型: float32

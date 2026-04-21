@@ -8,13 +8,10 @@ from typing import Tuple
 import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from constants import (
-    ANNUAL_HOLDING_COST_RATE,
     DEFAULT_FALLBACK_SELL_PRICE,
     DEFAULT_PENALTY_COEF,
-    FIXED_ORDERING_COST,
     HISTORY_WINDOW_DAYS,
     PROFIT_MARGIN_RATE,
-    WEEKS_PER_YEAR,
 )
 from interfaces import SKUCostParams
 from data.category import compute_adi, compute_cv2, classify_type
@@ -24,18 +21,20 @@ class M5InventoryDataset(Dataset):
     M5 沃尔玛库存数据集加载器
     负责读取特征并返回: (features, true_demand, cost_params)
     """
-    def __init__(self, data_path: str, mode: str = 'train', seq_len: int = HISTORY_WINDOW_DAYS, penalty_coef: float = DEFAULT_PENALTY_COEF):
+    def __init__(self, data_path: str, mode: str = 'train', seq_len: int = HISTORY_WINDOW_DAYS, penalty_coef: float = DEFAULT_PENALTY_COEF, horizon: int = 14):
         """
         Args:
             data_path: dataset 文件夹路径 (例如: '../dataset')
             mode: 'train' 或 'test'
             seq_len: 历史窗口长度 (默认使用过去 28 天的销量作为特征)
             penalty_coef: 缺货额外惩罚系数 (基于售价的倍数)，默认 0.0 以对齐 baseline 成本口径
+            horizon: 预测与模拟的未来天数 (时间循环的长度)
         """
         self.data_path = data_path
         self.mode = mode
         self.seq_len = seq_len
         self.penalty_coef = penalty_coef
+        self.horizon = horizon
         
         # 1. 加载核心销售数据
         sales_path = os.path.join(data_path, 'sales_train_evaluation.csv')
@@ -109,10 +108,10 @@ class M5InventoryDataset(Dataset):
         features_np = row[feature_cols].values.astype(np.float32)
         features = torch.tensor(features_np, dtype=torch.float32).unsqueeze(-1)
         
-        # 2. 提取真实需求 (目标天的销量)
-        target_col = f'd_{self.target_day_idx + 1}'
-        true_demand_np = np.float32(row[target_col])
-        true_demand = torch.tensor([true_demand_np], dtype=torch.float32)
+        # 2. 提取真实需求 (目标天开始的 horizon 天的销量)
+        target_cols = [f'd_{i}' for i in range(self.target_day_idx + 1, self.target_day_idx + 1 + self.horizon)]
+        true_demand_np = row[target_cols].values.astype(np.float32)
+        true_demand = torch.tensor(true_demand_np, dtype=torch.float32)
         
         # 3. 构造业务成本参数 (优先对齐 baseline notebook 的统一成本口径)
         # 获取该 SKU 在该门店的历史平均价格 (作为售价)
@@ -122,15 +121,13 @@ class M5InventoryDataset(Dataset):
         p_i = sell_price * (1 - PROFIT_MARGIN_RATE)
         
         # 持仓成本 = (售价 * 年库存成本率) / 52周，对齐参考 notebook 中的 c_h 定义
-        c_h = sell_price * ANNUAL_HOLDING_COST_RATE / WEEKS_PER_YEAR
+        c_h = sell_price * 0.20 / 52
         
-        # 缺货成本(c_u): 默认等于毛利损失；可通过 penalty_coef 增加额外业务惩罚
-        lost_margin = sell_price - p_i
-        reputation_penalty = sell_price * self.penalty_coef
-        c_u = lost_margin + reputation_penalty
+        # 缺货成本(c_u): 统一采用 sell_price * 0.35，不再用 penalty
+        c_u = sell_price * 0.35
         
         # 固定订货成本
-        c_f = FIXED_ORDERING_COST
+        c_f = 5.0
         
         # 假设体积 v_i 根据类别简单映射
         v_i = 1.0

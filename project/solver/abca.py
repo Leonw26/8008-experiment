@@ -13,14 +13,19 @@ class ABCASolver:
         self.pop_size = pop_size
         self.limit = limit  # 侦查蜂重置阈值
         
-    def _evaluate_cost(self, Q: np.ndarray, y_pred: np.ndarray, global_constraints: GlobalConstraints) -> float:
+    def _evaluate_cost(self, Q: np.ndarray, y_pred: np.ndarray, I_prev: np.ndarray, global_constraints: GlobalConstraints, D_true: np.ndarray = None) -> float:
         """
         评估某个解的成本 (适应度函数，越小越好)
         包括：持有成本(h)、缺货成本(u)、固定订货成本(f) 以及 违反全局约束的惩罚项
         """
         # 业务成本计算 (向量化提速)
-        holding_cost = np.sum(self._c_h * np.maximum(0, Q - y_pred))
-        shortage_cost = np.sum(self._c_u * np.maximum(0, y_pred - Q))
+        # 预测的期末库存 = I_prev + Q - y_pred
+        # 如果提供了 D_true，则使用真实需求计算库存流转 (和 baseline 对齐)
+        demand = D_true if D_true is not None else y_pred
+        I_new = I_prev + Q - demand
+        
+        holding_cost = np.sum(self._c_h * np.maximum(0, I_new))
+        shortage_cost = np.sum(self._c_u * np.maximum(0, -I_new))
         order_cost = np.sum(self._c_f * (Q > 0))
         total_cost = holding_cost + shortage_cost + order_cost
         
@@ -72,7 +77,9 @@ class ABCASolver:
     def solve(self, 
               predictor_out: PredictorOutput, 
               cost_params: List[SKUCostParams], 
-              global_constraints: GlobalConstraints) -> SolverOutput:
+              global_constraints: GlobalConstraints,
+              I_prev: np.ndarray = None,
+              D_true: np.ndarray = None) -> SolverOutput:
         """
         求解最优订货量 Q_it
         
@@ -80,6 +87,8 @@ class ABCASolver:
             predictor_out (PredictorOutput): A 同学预测输出的数据类
             cost_params (List[SKUCostParams]): 包含各 SKU 成本参数的列表, 与 y_pred 对应
             global_constraints (GlobalConstraints): 全局约束，如 V_max 和 B_total
+            I_prev (np.ndarray): 期初库存量, 默认为 0
+            D_true (np.ndarray): 真实需求量 (用于对齐 baseline，评估决策效果)
             
         返回:
             SolverOutput: 包含求解出的最优离散订货量的接口类
@@ -87,6 +96,9 @@ class ABCASolver:
         y_pred = predictor_out.y_pred
         n_items = len(y_pred)
         
+        if I_prev is None:
+            I_prev = np.zeros(n_items, dtype=np.float32)
+            
         # 预提取参数为 Numpy 数组，大幅加速后续评估
         self._c_h = np.array([p.c_h for p in cost_params])
         self._c_u = np.array([p.c_u for p in cost_params])
@@ -114,7 +126,7 @@ class ABCASolver:
                 sampled_solution = np.random.normal(loc=safe_y_pred, scale=safe_scale)
                 population[i] = self._discretize_solution(sampled_solution)
 
-            fitness[i] = self._evaluate_cost(population[i], y_pred, global_constraints)
+            fitness[i] = self._evaluate_cost(population[i], y_pred, I_prev, global_constraints, D_true=D_true)
             
         best_idx = np.argmin(fitness)
         best_solution = population[best_idx].copy()
@@ -137,7 +149,7 @@ class ABCASolver:
                 new_solution[j] = new_solution[j] + int(phi * (population[i][j] - population[partner_idx][j]))
                 new_solution[j] = max(0, new_solution[j]) # 保证非负
                 
-                new_cost = self._evaluate_cost(new_solution, y_pred, global_constraints)
+                new_cost = self._evaluate_cost(new_solution, y_pred, I_prev, global_constraints, D_true=D_true)
                 
                 # 贪心选择
                 if new_cost < fitness[i]:
@@ -168,7 +180,7 @@ class ABCASolver:
                     new_solution[j] = new_solution[j] + int(phi * (population[i][j] - population[partner_idx][j]))
                     new_solution[j] = max(0, new_solution[j])
                     
-                    new_cost = self._evaluate_cost(new_solution, y_pred, global_constraints)
+                    new_cost = self._evaluate_cost(new_solution, y_pred, I_prev, global_constraints, D_true=D_true)
                     
                     if new_cost < fitness[i]:
                         population[i] = new_solution
@@ -193,7 +205,7 @@ class ABCASolver:
                     safe_scale = np.maximum(0.75, safe_y_pred * 0.5)
                     sampled_solution = np.random.normal(loc=safe_y_pred, scale=safe_scale)
                     population[i] = self._discretize_solution(sampled_solution)
-                    fitness[i] = self._evaluate_cost(population[i], y_pred, global_constraints)
+                    fitness[i] = self._evaluate_cost(population[i], y_pred, I_prev, global_constraints, D_true=D_true)
                     trials[i] = 0
 
         Q_it = best_solution

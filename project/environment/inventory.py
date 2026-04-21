@@ -13,7 +13,8 @@ class InventoryEnvironment:
     def evaluate_cost(self, 
                       solver_out: SolverOutput, 
                       true_demand: np.ndarray, 
-                      cost_params: List[SKUCostParams]) -> EnvironmentOutput:
+                      cost_params: List[SKUCostParams],
+                      I_prev: np.ndarray = None) -> EnvironmentOutput:
         """
         计算真实的库存运营成本 (Holding Cost + Shortage Cost + Ordering Cost)
         
@@ -21,23 +22,29 @@ class InventoryEnvironment:
             solver_out (SolverOutput): ABCA 求解器给出的订货量接口类
             true_demand (np.ndarray): 真实发生的需求量 D_it, 形状 (batch_size, )
             cost_params (List[SKUCostParams]): 各 SKU 的成本参数接口类
+            I_prev (np.ndarray): 期初库存量, 默认为 0
             
         返回:
             EnvironmentOutput: 包含每个 SKU 真实总成本的接口类
         """
-        # TODO: B同学需要在这里实现非线性、非对称的真实 Cost 计算
-        # 对应 Proposal 公式: TC = c_h * max(0, Q - D) + c_u * max(0, D - Q) + c_f * I(Q > 0)
-        
         Q_it = solver_out.Q_it
+        n_items = len(Q_it)
+        
+        if I_prev is None:
+            I_prev = np.zeros(n_items, dtype=np.float32)
+            
         # 将 cost_params 转换为 numpy 数组以进行向量化计算
         c_h_arr = np.array([cp.c_h for cp in cost_params], dtype=np.float32)
         c_u_arr = np.array([cp.c_u for cp in cost_params], dtype=np.float32)
         c_f_arr = np.array([cp.c_f for cp in cost_params], dtype=np.float32)
         
         # 向量化计算
+        # 真实期末库存 = 期初 + 订货 - 需求
+        I_new = I_prev + Q_it - true_demand
+        
         # 1. 积压量和缺货量
-        overage = np.maximum(0, Q_it - true_demand)
-        shortage = np.maximum(0, true_demand - Q_it)
+        overage = np.maximum(0, I_new)
+        shortage = np.maximum(0, -I_new)
         
         # 2. 持有成本和缺货成本
         holding_cost = c_h_arr * overage
@@ -47,7 +54,7 @@ class InventoryEnvironment:
         order_cost = np.where(Q_it > 0, c_f_arr, 0.0)
         
         # 4. 服务水平对应的实际满足需求量
-        fulfilled_demand = np.minimum(true_demand, Q_it)
+        fulfilled_demand = np.minimum(true_demand, I_prev + Q_it)
 
         # 5. 总成本
         costs = holding_cost + shortage_cost + order_cost
@@ -57,5 +64,6 @@ class InventoryEnvironment:
             holding_costs=holding_cost.astype(np.float32),
             shortage_costs=shortage_cost.astype(np.float32),
             order_costs=order_cost.astype(np.float32),
-            fulfilled_demand=fulfilled_demand.astype(np.float32)
+            fulfilled_demand=fulfilled_demand.astype(np.float32),
+            I_curr=I_new.astype(np.float32)
         )

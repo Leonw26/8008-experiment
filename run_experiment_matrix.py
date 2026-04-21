@@ -92,30 +92,45 @@ def run_experiment(repo_root: Path, output_dir: Path, experiment: Dict[str, obje
     使用 `uv run python` 执行单组实验，并返回解析后的结果。
     """
     command = ["uv", "run", "python", "project/main.py", *experiment["args"]]
-    completed = subprocess.run(
+    
+    # 使用 Popen 实时读取输出，以便在控制台显示进度
+    process = subprocess.Popen(
         command,
         cwd=repo_root,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
         text=True,
-        check=False,
+        bufsize=1,
     )
 
+    output_lines = []
+    if process.stdout:
+        for line in process.stdout:
+            print(line, end="")  # 实时打印进度到控制台
+            output_lines.append(line)
+
+    process.wait()
+    full_output = "".join(output_lines)
+
     log_path = output_dir / "logs" / f"{experiment['name']}.log"
-    log_path.write_text(completed.stdout + "\n\n[stderr]\n" + completed.stderr, encoding="utf-8")
+    log_path.write_text(full_output, encoding="utf-8")
 
     result: Dict[str, object] = {
         "name": experiment["name"],
         "label": experiment["label"],
         "use_segmentation": experiment["use_segmentation"],
         "command": " ".join(command),
-        "return_code": completed.returncode,
+        "return_code": process.returncode,
         "log_path": str(log_path),
     }
 
-    if completed.returncode == 0:
-        result.update(parse_metrics(completed.stdout))
+    if process.returncode == 0:
+        try:
+            result.update(parse_metrics(full_output))
+        except Exception as e:
+            result["error"] = f"解析指标失败: {e}"
     else:
-        result["error"] = completed.stderr.strip() or "命令执行失败，请查看日志。"
+        result["error"] = "命令执行失败，请查看日志。"
 
     return result
 

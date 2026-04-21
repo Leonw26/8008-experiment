@@ -218,24 +218,37 @@ def evaluate_model(
         for features, category_idx, true_demand, cost_params_batch in dataloader:
             features = features.to(device)
             category_idx_device = category_idx.to(device)
-            y_pred_tensor = predictor(features, category_idx_device)
-
-            y_pred_np = y_pred_tensor.detach().cpu().numpy().flatten()
-            true_demand_np = true_demand.numpy().flatten()
+            true_demand_batch = true_demand.to(device) # shape: (batch, horizon)
+            
+            horizon = true_demand_batch.shape[1]
+            batch_size = features.shape[0]
+            I_curr_np = np.zeros(batch_size, dtype=np.float32)
+            cost_params_list = normalize_cost_params(cost_params_batch, batch_size=batch_size)
             category_idx_np = category_idx.numpy().flatten()
-            cost_params_list = normalize_cost_params(cost_params_batch, batch_size=len(y_pred_np))
+            
+            for t in range(horizon):
+                y_pred_tensor = predictor(features, category_idx_device)
+                y_pred_np = y_pred_tensor.detach().cpu().numpy().flatten()
+                true_demand_np = true_demand_batch[:, t].cpu().numpy().flatten()
 
-            predictor_out = PredictorOutput(y_pred=y_pred_np)
-            solver_out = solver.solve(predictor_out, cost_params_list, build_global_constraints())
-            env_out = env.evaluate_cost(solver_out, true_demand_np, cost_params_list)
+                predictor_out = PredictorOutput(y_pred=y_pred_np)
+                solver_out = solver.solve(predictor_out, cost_params_list, build_global_constraints(), I_prev=I_curr_np, D_true=true_demand_np)
+                env_out = env.evaluate_cost(solver_out, true_demand_np, cost_params_list, I_prev=I_curr_np)
+                
+                I_curr_np = env_out.I_curr
 
-            update_cost_bucket(overall_bucket, env_out, true_demand_np)
+                update_cost_bucket(overall_bucket, env_out, true_demand_np)
 
-            for segment_idx in np.unique(category_idx_np):
-                segment_name = get_category_name(segment_idx)
-                segment_buckets.setdefault(segment_name, init_cost_bucket())
-                mask = (category_idx_np == segment_idx)
-                update_cost_bucket(segment_buckets[segment_name], env_out, true_demand_np, mask=mask)
+                for segment_idx in np.unique(category_idx_np):
+                    segment_name = get_category_name(segment_idx)
+                    segment_buckets.setdefault(segment_name, init_cost_bucket())
+                    mask = (category_idx_np == segment_idx)
+                    update_cost_bucket(segment_buckets[segment_name], env_out, true_demand_np, mask=mask)
+                    
+                # 更新特征窗口：去掉最早的一天，把这一天的真实需求加进去
+                # 避免 inplace 操作
+                next_feature = true_demand_batch[:, t].unsqueeze(1).unsqueeze(2)
+                features = torch.cat([features[:, 1:, :], next_feature], dim=1)
 
     predictor.train()
     report = {
@@ -362,34 +375,101 @@ def train_predict_and_optimize(
         for batch_idx, (features, category_idx, true_demand, cost_params_batch) in enumerate(dataloader):
             features = features.to(device)
             category_idx = category_idx.to(device)
-            true_demand_tensor = true_demand.to(device).view(-1)
-
-            optimizer.zero_grad()
-            y_pred_tensor = predictor(features, category_idx)
-            y_pred_flat = y_pred_tensor.view(-1)
-            y_pred_np = y_pred_flat.detach().cpu().numpy()
-            true_demand_np = true_demand.numpy().flatten()
-            cost_params_list = normalize_cost_params(cost_params_batch, batch_size=len(y_pred_np))
+            true_demand_batch = true_demand.to(device) # shape: (batch, horizon)
+            
+            horizon = true_demand_batch.shape[1]
+            batch_size = features.shape[0]
+            cost_params_list = normalize_cost_params(cost_params_batch, batch_size=batch_size)
             context_np = build_context_array(cost_params_list)
 
-            predictor_out = PredictorOutput(y_pred=y_pred_np)
-            solver_out = solver.solve(predictor_out, cost_params_list, build_global_constraints())
-            env_out = env.evaluate_cost(solver_out, true_demand_np, cost_params_list)
-            true_costs_np = env_out.true_costs
-
-            pred_loss, raw_mse_loss = compute_prediction_losses(y_pred_flat, true_demand_tensor)
-            service_penalty, proxy_service = compute_service_penalty(
-                y_pred_flat=y_pred_flat,
-                true_demand_tensor=true_demand_tensor,
-                service_level_target=service_level_target,
-                service_penalty_weight=service_penalty_weight
-            )
-            cost_loss_value = float(np.mean(true_costs_np))
+            optimizer.zero_grad()
+            
+            total_loss = 0.0
+            cost_loss_value = 0.0
+            pred_loss_value = 0.0
+            raw_mse_loss_value = 0.0
+            service_penalty_value = 0.0
+            proxy_service_value = 0.0
+            mean_true_cost_value = 0.0
+            
+            I_curr_np = np.zeros(batch_size, dtype=np.float32)
+            
+            batch_y_preds = []
+            batch_contexts = []
+            batch_true_costs = []
+            
             effective_mode = "pao"
+            
+            for t in range(horizon):
+                true_demand_t = true_demand_batch[:, t]
+                true_demand_t_np = true_demand_t.cpu().numpy().flatten()
+                
+                y_pred_tensor = predictor(features, category_idx)
+                y_pred_flat = y_pred_tensor.view(-1)
+                y_pred_np = y_pred_flat.detach().cpu().numpy()
+                
+                predictor_out = PredictorOutput(y_pred=y_pred_np)
+                solver_out = solver.solve(predictor_out, cost_params_list, build_global_constraints(), I_prev=I_curr_np, D_true=true_demand_t_np)
+                env_out = env.evaluate_cost(solver_out, true_demand_t_np, cost_params_list, I_prev=I_curr_np)
+                
+                true_costs_np = env_out.true_costs
+                I_curr_np = env_out.I_curr
+                
+                batch_y_preds.extend(y_pred_np)
+                batch_contexts.extend(context_np)
+                batch_true_costs.extend(true_costs_np)
+                
+                pred_loss_t, raw_mse_loss_t = compute_prediction_losses(y_pred_flat, true_demand_t)
+                service_penalty_t, proxy_service_t = compute_service_penalty(
+                    y_pred_flat=y_pred_flat,
+                    true_demand_tensor=true_demand_t,
+                    service_level_target=service_level_target,
+                    service_penalty_weight=service_penalty_weight
+                )
+                
+                if surrogate.is_trained:
+                    context_tensor = torch.tensor(context_np, dtype=torch.float32, device=device)
+                    cost_tensor = SurrogateAutogradFunction.apply(y_pred_tensor, context_tensor, surrogate)
+                    cost_loss_t = cost_tensor.mean()
+                    loss_t, _ = build_total_loss(
+                        cost_loss=cost_loss_t,
+                        pred_loss=pred_loss_t,
+                        loss_strategy=loss_strategy,
+                        loss_alpha=loss_alpha
+                    )
+                    loss_t = loss_t + service_penalty_t
+                    cost_loss_value += float(cost_loss_t.item())
+                else:
+                    loss_t = pred_loss_t + service_penalty_t
+                    effective_mode = "pao_warmup"
+                    
+                total_loss = total_loss + loss_t
+                pred_loss_value += pred_loss_t.item()
+                raw_mse_loss_value += raw_mse_loss_t.item()
+                service_penalty_value += service_penalty_t.item()
+                proxy_service_value += proxy_service_t.item()
+                mean_true_cost_value += true_costs_np.mean()
+                
+                # 滚动特征，模拟时间推移
+                if t < horizon - 1:
+                    next_feature = true_demand_t.unsqueeze(1).unsqueeze(2)
+                    features = torch.cat([features[:, 1:, :], next_feature], dim=1)
 
-            history_y_pred.extend(y_pred_np)
-            history_context.extend(context_np)
-            history_true_cost.extend(true_costs_np)
+            total_loss = total_loss / horizon
+            cost_loss_value /= horizon
+            pred_loss_value /= horizon
+            raw_mse_loss_value /= horizon
+            service_penalty_value /= horizon
+            proxy_service_value /= horizon
+            mean_true_cost_value /= horizon
+
+            total_loss.backward()
+            clip_grad_norm_(predictor.parameters(), max_norm=grad_clip_norm)
+            optimizer.step()
+
+            history_y_pred.extend(batch_y_preds)
+            history_context.extend(batch_contexts)
+            history_true_cost.extend(batch_true_costs)
 
             if len(history_y_pred) >= 1000 and batch_idx % surrogate_update_freq == 0:
                 surrogate.train_surrogate(
@@ -401,43 +481,23 @@ def train_predict_and_optimize(
                 history_context = history_context[-20000:]
                 history_true_cost = history_true_cost[-20000:]
 
-            if surrogate.is_trained:
-                context_tensor = torch.tensor(context_np, dtype=torch.float32, device=device)
-                cost_tensor = SurrogateAutogradFunction.apply(y_pred_tensor, context_tensor, surrogate)
-                cost_loss = cost_tensor.mean()
-                total_loss, _ = build_total_loss(
-                    cost_loss=cost_loss,
-                    pred_loss=pred_loss,
-                    loss_strategy=loss_strategy,
-                    loss_alpha=loss_alpha
-                )
-                total_loss = total_loss + service_penalty
-                cost_loss_value = float(cost_loss.item())
-            else:
-                total_loss = pred_loss + service_penalty
-                effective_mode = "pao_warmup"
-
-            total_loss.backward()
-            clip_grad_norm_(predictor.parameters(), max_norm=grad_clip_norm)
-            optimizer.step()
-
             if ema_total_loss is None:
                 ema_total_loss = total_loss.item()
                 ema_cost_loss = cost_loss_value
-                ema_pred_loss = pred_loss.item()
+                ema_pred_loss = pred_loss_value
             else:
                 ema_total_loss = 0.95 * ema_total_loss + 0.05 * total_loss.item()
                 ema_cost_loss = 0.95 * ema_cost_loss + 0.05 * cost_loss_value
-                ema_pred_loss = 0.95 * ema_pred_loss + 0.05 * pred_loss.item()
+                ema_pred_loss = 0.95 * ema_pred_loss + 0.05 * pred_loss_value
 
             if batch_idx % 50 == 0:
                 mean_grad = getattr(surrogate, 'last_mean_abs_grad', 0.0)
                 print(
                     f"Epoch {epoch} | Batch {batch_idx} | Mode: {effective_mode} "
                     f"| Total Loss: {total_loss.item():.4f} | Cost Loss: {cost_loss_value:.4f} "
-                    f"| Pred Loss: {pred_loss.item():.4f} | Raw MSE: {raw_mse_loss.item():.4f} "
-                    f"| Service Penalty: {service_penalty.item():.4f} | Proxy Service: {proxy_service.item():.2%} "
-                    f"| EMA Total: {ema_total_loss:.4f} | Mean True Cost: {true_costs_np.mean():.4f} "
+                    f"| Pred Loss: {pred_loss_value:.4f} | Raw MSE: {raw_mse_loss_value:.4f} "
+                    f"| Service Penalty: {service_penalty_value:.4f} | Proxy Service: {proxy_service_value:.2%} "
+                    f"| EMA Total: {ema_total_loss:.4f} | Mean True Cost: {mean_true_cost_value:.4f} "
                     f"| Mean Abs Grad: {mean_grad:.4f}"
                 )
 
@@ -448,12 +508,12 @@ def train_predict_and_optimize(
                     "batch": batch_idx,
                     "total_loss": total_loss.item(),
                     "cost_loss": cost_loss_value,
-                    "pred_loss": pred_loss.item(),
-                    "service_penalty": service_penalty.item(),
-                    "proxy_service": proxy_service.item(),
-                    "mse_loss": raw_mse_loss.item(),
-                    "mean_true_cost": true_costs_np.mean(),
-                    "mean_y_pred": y_pred_np.mean(),
+                    "pred_loss": pred_loss_value,
+                    "service_penalty": service_penalty_value,
+                    "proxy_service": proxy_service_value,
+                    "mse_loss": raw_mse_loss_value,
+                    "mean_true_cost": mean_true_cost_value,
+                    "mean_y_pred": np.mean(batch_y_preds),
                     "mean_abs_grad": mean_grad
                 })
 
