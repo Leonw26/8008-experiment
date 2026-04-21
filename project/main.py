@@ -12,6 +12,8 @@ from constants import (
     DEFAULT_LOSS_ALPHA,
     DEFAULT_LOSS_STRATEGY,
     DEFAULT_PENALTY_COEF,
+    DEFAULT_SERVICE_LEVEL_TARGET,
+    DEFAULT_SERVICE_PENALTY_WEIGHT,
     DEFAULT_SOLVER_MAX_ITER,
     DEFAULT_SOLVER_POP_SIZE,
     HISTORY_WINDOW_DAYS,
@@ -26,13 +28,13 @@ from train.loop import train_predict_and_optimize
 def main():
     """
     Predict-and-Optimize 框架全局入口文件
-    负责初始化所有模块并启动端到端训练流水线。
+    负责初始化所有模块，并支持 PAO 训练和测试集成本评估。
     """
     parser = argparse.ArgumentParser(description="End-to-End Predict-and-Optimize Training")
     parser.add_argument('--epochs', type=int, default=DEFAULT_EPOCHS, help=f'epochs数量 (default: {DEFAULT_EPOCHS})')
     parser.add_argument('--report_to', type=str, default='none', help='是否上报指标到特定平台，如 "wandb"')
     parser.add_argument('--exp_name', type=str, default=DEFAULT_EXP_NAME, help=f'实验/项目名称，当 report_to=wandb 时作为 wandb project name (default: {DEFAULT_EXP_NAME})')
-    parser.add_argument('--penalty_coef', type=float, default=DEFAULT_PENALTY_COEF, help=f'缺货声誉惩罚系数，基于售价的倍数 (default: {DEFAULT_PENALTY_COEF})')
+    parser.add_argument('--penalty_coef', type=float, default=DEFAULT_PENALTY_COEF, help=f'缺货额外惩罚系数，基于售价的倍数；设为 0.0 时对齐 baseline 成本口径 (default: {DEFAULT_PENALTY_COEF})')
     parser.add_argument('--learning_rate', type=float, default=DEFAULT_LEARNING_RATE, help=f'预测模型学习率 (default: {DEFAULT_LEARNING_RATE})')
     parser.add_argument(
         '--loss_strategy',
@@ -42,7 +44,10 @@ def main():
         help='loss方案: weighted_sum 或 balanced_sum'
     )
     parser.add_argument('--loss_alpha', type=float, default=DEFAULT_LOSS_ALPHA, help=f'预测损失的权重系数 (default: {DEFAULT_LOSS_ALPHA})')
+    parser.add_argument('--service_level_target', type=float, default=DEFAULT_SERVICE_LEVEL_TARGET, help=f'PAO 训练时的目标服务率阈值，低于该值会触发惩罚 (default: {DEFAULT_SERVICE_LEVEL_TARGET})')
+    parser.add_argument('--service_penalty_weight', type=float, default=DEFAULT_SERVICE_PENALTY_WEIGHT, help=f'PAO 训练时服务率惩罚项的权重 (default: {DEFAULT_SERVICE_PENALTY_WEIGHT})')
     parser.add_argument('--grad_clip_norm', type=float, default=DEFAULT_GRAD_CLIP_NORM, help=f'参数梯度裁剪阈值 (default: {DEFAULT_GRAD_CLIP_NORM})')
+    parser.add_argument('--use_segmentation', action='store_true', help='是否启用 segmentation 特征（按 ADI/CV2 分类后嵌入模型）')
     args = parser.parse_args()
 
     print("Initializing Project Components...")
@@ -59,13 +64,27 @@ def main():
         data_path=dataset_path,
         batch_size=DEFAULT_BATCH_SIZE,
         penalty_coef=args.penalty_coef,
-        seq_len=HISTORY_WINDOW_DAYS
+        seq_len=HISTORY_WINDOW_DAYS,
+        mode='train'
     )
-    print(f"DEBUG: DataLoader length: {len(dataloader)}")
+    eval_dataloader = get_dataloader(
+        data_path=dataset_path,
+        batch_size=DEFAULT_BATCH_SIZE,
+        penalty_coef=args.penalty_coef,
+        seq_len=HISTORY_WINDOW_DAYS,
+        mode='test'
+    )
+    print(f"DEBUG: Train DataLoader length: {len(dataloader)}")
+    print(f"DEBUG: Eval DataLoader length: {len(eval_dataloader)}")
     
     # 2. 初始化预测模型 (A同学负责)
     # 每个时间步只输入当天销量，因此 input_size=1，序列长度由 DataLoader 控制。
-    predictor = DemandPredictor(input_size=1, hidden_size=64, output_size=1).to(device)
+    predictor = DemandPredictor(
+        input_size=1,
+        hidden_size=64,
+        output_size=1,
+        use_category_embedding=args.use_segmentation
+    ).to(device)
     
     # 3. 初始化求解器与环境 (B同学负责)
     solver = ABCASolver(max_iter=DEFAULT_SOLVER_MAX_ITER, pop_size=DEFAULT_SOLVER_POP_SIZE)
@@ -88,7 +107,10 @@ def main():
         learning_rate=args.learning_rate,
         loss_strategy=args.loss_strategy,
         loss_alpha=args.loss_alpha,
-        grad_clip_norm=args.grad_clip_norm
+        service_level_target=args.service_level_target,
+        service_penalty_weight=args.service_penalty_weight,
+        grad_clip_norm=args.grad_clip_norm,
+        eval_dataloader=eval_dataloader
     )
 
 if __name__ == "__main__":

@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-from typing import List
 import numpy as np
 
 @dataclass
@@ -46,4 +45,9 @@ class EnvironmentOutput:
     """
     B 同学业务环境的评估输出 (B -> C 的接口)
     """
-    true_costs: np.ndarray # 在真实需求下的总成本。形状: (batch_size, )。数据类型: float32
+    true_costs: np.ndarray      # 在真实需求下的总成本。形状: (batch_size, )。数据类型: float32
+    holding_costs: np.ndarray   # 持有成本分量。形状: (batch_size, )。数据类型: float32
+    shortage_costs: np.ndarray  # 缺货成本分量。形状: (batch_size, )。数据类型: float32
+    order_costs: np.ndarray     # 固定订货成本分量。形状: (batch_size, )。数据类型: float32
+    fulfilled_demand: np.ndarray # 满足的需求量。形状: (batch_size, )。数据类型: float32
+    I_curr: np.ndarray          # 真实期末库存。形状: (batch_size, )。数据类型: float32
