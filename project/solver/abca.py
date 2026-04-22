@@ -1,6 +1,142 @@
 import numpy as np
 from typing import List
 from interfaces import SKUCostParams, GlobalConstraints, PredictorOutput, SolverOutput
+from numba import njit
+
+@njit(fastmath=True, cache=True)
+def numba_evaluate_cost(Q, demand, I_prev, c_h, c_u, c_f, v_i, p_i, V_max, B_total):
+    """
+    评估某个解的成本 (适应度函数，越小越好)
+    包括：持有成本(h)、缺货成本(u)、固定订货成本(f) 以及 违反全局约束的惩罚项
+    """
+    I_new = I_prev + Q - demand
+    holding_cost = np.sum(c_h * np.maximum(0.0, I_new))
+    shortage_cost = np.sum(c_u * np.maximum(0.0, -I_new))
+    order_cost = np.sum(c_f * (Q > 0))
+    total_cost = holding_cost + shortage_cost + order_cost
+    
+    total_volume = np.sum(Q * v_i)
+    total_budget = np.sum(Q * p_i)
+    
+    penalty = 0.0
+    if total_volume > V_max:
+        penalty += 1000.0 * (total_volume - V_max)
+    if total_budget > B_total:
+        penalty += 1000.0 * (total_budget - B_total)
+        
+    return total_cost + penalty
+
+@njit(fastmath=True, cache=True)
+def numba_discretize_solution(raw_solution):
+    """将连续订货量稳定地离散化为非负整数。"""
+    clipped = np.maximum(0.0, raw_solution)
+    integer_part = np.floor(clipped)
+    fractional_part = clipped - integer_part
+    round_up_mask = np.random.rand(clipped.shape[0]) < fractional_part
+    return (integer_part + round_up_mask).astype(np.int32)
+
+@njit(fastmath=True, cache=True)
+def numba_abca_solve(y_pred, I_prev, demand, c_h, c_u, c_f, v_i, p_i, V_max, B_total, 
+                     pop_size, max_iter, limit, seed_solutions):
+    """Numba 加速的人工蜂群主循环"""
+    n_items = len(y_pred)
+    population = np.zeros((pop_size, n_items), dtype=np.int32)
+    fitness = np.zeros(pop_size)
+    trials = np.zeros(pop_size, dtype=np.int32)
+    
+    safe_y_pred = y_pred.copy()
+    for i in range(n_items):
+        if np.isnan(safe_y_pred[i]):
+            safe_y_pred[i] = 0.0
+            
+    num_seeds = seed_solutions.shape[0]
+    for i in range(pop_size):
+        if i < num_seeds:
+            population[i] = seed_solutions[i]
+        else:
+            sampled_solution = np.zeros(n_items, dtype=np.float64)
+            for j in range(n_items):
+                safe_scale = max(0.5, safe_y_pred[j] * 0.35)
+                sampled_solution[j] = np.random.normal(safe_y_pred[j], safe_scale)
+            population[i] = numba_discretize_solution(sampled_solution)
+
+        fitness[i] = numba_evaluate_cost(population[i], demand, I_prev, c_h, c_u, c_f, v_i, p_i, V_max, B_total)
+        
+    best_idx = np.argmin(fitness)
+    best_solution = population[best_idx].copy()
+    best_cost = fitness[best_idx]
+    
+    for _ in range(max_iter):
+        # 2. 雇佣蜂阶段 (Employed Bees)
+        for i in range(pop_size):
+            partner_idx = np.random.randint(0, pop_size - 1)
+            if partner_idx >= i:
+                partner_idx += 1
+                
+            j = np.random.randint(0, n_items)
+            phi = np.random.uniform(-1.0, 1.0)
+            
+            new_solution = population[i].copy()
+            new_solution[j] = new_solution[j] + int(phi * (population[i][j] - population[partner_idx][j]))
+            new_solution[j] = max(0, new_solution[j])
+            
+            new_cost = numba_evaluate_cost(new_solution, demand, I_prev, c_h, c_u, c_f, v_i, p_i, V_max, B_total)
+            
+            if new_cost < fitness[i]:
+                population[i] = new_solution
+                fitness[i] = new_cost
+                trials[i] = 0
+            else:
+                trials[i] += 1
+                
+        # 3. 观察蜂阶段 (Onlooker Bees)
+        fit_values = 1.0 / (1.0 + fitness)
+        probs = fit_values / np.sum(fit_values)
+        
+        t = 0
+        i = 0
+        while t < pop_size:
+            if np.random.rand() < probs[i]:
+                t += 1
+                partner_idx = np.random.randint(0, pop_size - 1)
+                if partner_idx >= i:
+                    partner_idx += 1
+                    
+                j = np.random.randint(0, n_items)
+                phi = np.random.uniform(-1.0, 1.0)
+                
+                new_solution = population[i].copy()
+                new_solution[j] = new_solution[j] + int(phi * (population[i][j] - population[partner_idx][j]))
+                new_solution[j] = max(0, new_solution[j])
+                
+                new_cost = numba_evaluate_cost(new_solution, demand, I_prev, c_h, c_u, c_f, v_i, p_i, V_max, B_total)
+                
+                if new_cost < fitness[i]:
+                    population[i] = new_solution
+                    fitness[i] = new_cost
+                    trials[i] = 0
+                else:
+                    trials[i] += 1
+            
+            i = (i + 1) % pop_size
+            
+        current_best_idx = np.argmin(fitness)
+        if fitness[current_best_idx] < best_cost:
+            best_cost = fitness[current_best_idx]
+            best_solution = population[current_best_idx].copy()
+            
+        # 4. 侦查蜂阶段 (Scout Bees)
+        for i in range(pop_size):
+            if trials[i] >= limit:
+                sampled_solution = np.zeros(n_items, dtype=np.float64)
+                for j in range(n_items):
+                    safe_scale = max(0.75, safe_y_pred[j] * 0.5)
+                    sampled_solution[j] = np.random.normal(safe_y_pred[j], safe_scale)
+                population[i] = numba_discretize_solution(sampled_solution)
+                fitness[i] = numba_evaluate_cost(population[i], demand, I_prev, c_h, c_u, c_f, v_i, p_i, V_max, B_total)
+                trials[i] = 0
+
+    return best_solution
 
 class ABCASolver:
     """
@@ -116,97 +252,16 @@ class ABCASolver:
         
         safe_y_pred = np.nan_to_num(y_pred, nan=0.0)
         seed_solutions = self._build_seed_population(safe_y_pred)
-
-        for i in range(self.pop_size):
-            if i < len(seed_solutions):
-                population[i] = seed_solutions[i]
-            else:
-                # 围绕预测需求量生成初始解，并保留小于 1 的探索机会。
-                safe_scale = np.maximum(0.5, safe_y_pred * 0.35)
-                sampled_solution = np.random.normal(loc=safe_y_pred, scale=safe_scale)
-                population[i] = self._discretize_solution(sampled_solution)
-
-            fitness[i] = self._evaluate_cost(population[i], y_pred, I_prev, global_constraints, D_true=D_true)
-            
-        best_idx = np.argmin(fitness)
-        best_solution = population[best_idx].copy()
-        best_cost = fitness[best_idx]
+        seed_solutions_array = np.array(seed_solutions, dtype=np.int32)
         
-        for _ in range(self.max_iter):
-            # 2. 雇佣蜂阶段 (Employed Bees)
-            for i in range(self.pop_size):
-                # 随机选择一个不等于当前蜜蜂的其他蜜蜂
-                partner_idx = np.random.randint(0, self.pop_size - 1)
-                if partner_idx >= i:
-                    partner_idx += 1
-                    
-                # 随机选择一个维度进行扰动
-                j = np.random.randint(0, n_items)
-                phi = np.random.uniform(-1, 1)
-                
-                new_solution = population[i].copy()
-                # 更新公式: v_{ij} = x_{ij} + phi * (x_{ij} - x_{kj})
-                new_solution[j] = new_solution[j] + int(phi * (population[i][j] - population[partner_idx][j]))
-                new_solution[j] = max(0, new_solution[j]) # 保证非负
-                
-                new_cost = self._evaluate_cost(new_solution, y_pred, I_prev, global_constraints, D_true=D_true)
-                
-                # 贪心选择
-                if new_cost < fitness[i]:
-                    population[i] = new_solution
-                    fitness[i] = new_cost
-                    trials[i] = 0
-                else:
-                    trials[i] += 1
-                    
-            # 3. 观察蜂阶段 (Onlooker Bees)
-            # 计算选择概率 (成本越低，概率越大。这里转换为适应度: 1 / (1 + cost))
-            fit_values = 1.0 / (1.0 + fitness)
-            probs = fit_values / np.sum(fit_values)
-            
-            t = 0
-            i = 0
-            while t < self.pop_size:
-                if np.random.rand() < probs[i]:
-                    t += 1
-                    partner_idx = np.random.randint(0, self.pop_size - 1)
-                    if partner_idx >= i:
-                        partner_idx += 1
-                        
-                    j = np.random.randint(0, n_items)
-                    phi = np.random.uniform(-1, 1)
-                    
-                    new_solution = population[i].copy()
-                    new_solution[j] = new_solution[j] + int(phi * (population[i][j] - population[partner_idx][j]))
-                    new_solution[j] = max(0, new_solution[j])
-                    
-                    new_cost = self._evaluate_cost(new_solution, y_pred, I_prev, global_constraints, D_true=D_true)
-                    
-                    if new_cost < fitness[i]:
-                        population[i] = new_solution
-                        fitness[i] = new_cost
-                        trials[i] = 0
-                    else:
-                        trials[i] += 1
-                
-                i = (i + 1) % self.pop_size
-                
-            # 记录全局最优
-            current_best_idx = np.argmin(fitness)
-            if fitness[current_best_idx] < best_cost:
-                best_cost = fitness[current_best_idx]
-                best_solution = population[current_best_idx].copy()
-                
-            # 4. 侦查蜂阶段 (Scout Bees)
-            for i in range(self.pop_size):
-                if trials[i] >= self.limit:
-                    # 重新随机生成一个解
-                    # 安全保护：即使预测值很小，也保留非零探索能力。
-                    safe_scale = np.maximum(0.75, safe_y_pred * 0.5)
-                    sampled_solution = np.random.normal(loc=safe_y_pred, scale=safe_scale)
-                    population[i] = self._discretize_solution(sampled_solution)
-                    fitness[i] = self._evaluate_cost(population[i], y_pred, I_prev, global_constraints, D_true=D_true)
-                    trials[i] = 0
+        demand = D_true if D_true is not None else y_pred
+        
+        best_solution = numba_abca_solve(
+            y_pred, I_prev, demand, 
+            self._c_h, self._c_u, self._c_f, self._v_i, self._p_i, 
+            float(global_constraints.V_max), float(global_constraints.B_total),
+            self.pop_size, self.max_iter, self.limit, seed_solutions_array
+        )
 
         Q_it = best_solution
         

@@ -53,8 +53,8 @@ class InventoryEnvironment:
         # 3. 订货成本: 只有当订货量大于0时才发生
         order_cost = np.where(Q_it > 0, c_f_arr, 0.0)
         
-        # 4. 服务水平对应的实际满足需求量
-        fulfilled_demand = np.minimum(true_demand, I_prev + Q_it)
+        # 4. 服务水平对应的实际满足需求量 (修正负数 bug：若可用库存为负，则无法满足任何新需求)
+        fulfilled_demand = np.minimum(true_demand, np.maximum(0.0, I_prev + Q_it))
 
         # 5. 总成本
         costs = holding_cost + shortage_cost + order_cost

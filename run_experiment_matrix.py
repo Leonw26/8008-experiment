@@ -18,10 +18,11 @@ def build_experiments() -> List[Dict[str, object]]:
     定义本次需要执行的 PAO 实验矩阵。
     """
     common_args = [
-        "--epochs", "5",
-        "--learning_rate", "0.0005",
-        "--service_penalty_weight", "50",
-        "--service_level_target", "0.9",
+        "--epochs", "50",
+        "--learning_rate", "0.001",
+        "--service_penalty_weight", "500",
+        "--service_level_target", "0.95",
+        "--subset_nrows", "30490",  # 默认使用十分之一的数据进行调试。总数30490
     ]
     return [
         {
@@ -91,7 +92,8 @@ def run_experiment(repo_root: Path, output_dir: Path, experiment: Dict[str, obje
     """
     使用 `uv run python` 执行单组实验，并返回解析后的结果。
     """
-    command = ["uv", "run", "python", "project/main.py", *experiment["args"]]
+    # 增加 -u 参数强制 python 不缓冲输出，配合 Popen 实时读取
+    command = ["uv", "run", "python", "-u", "project/main.py", *experiment["args"]]
     
     # 使用 Popen 实时读取输出，以便在控制台显示进度
     process = subprocess.Popen(
@@ -106,7 +108,7 @@ def run_experiment(repo_root: Path, output_dir: Path, experiment: Dict[str, obje
     output_lines = []
     if process.stdout:
         for line in process.stdout:
-            print(line, end="")  # 实时打印进度到控制台
+            print(f"[{experiment['name']}] {line}", end="", flush=True)  # 实时打印进度到控制台
             output_lines.append(line)
 
     process.wait()
@@ -172,11 +174,21 @@ def main() -> None:
 
     results = []
     experiment_plan = build_experiments()
+    
+    print(f"Starting {len(experiment_plan)} experiments serially...")
+    start_time_all = datetime.now()
     for experiment in experiment_plan:
         print(f"Running experiment: {experiment['name']}")
+        start_time_exp = datetime.now()
         result = run_experiment(repo_root=repo_root, output_dir=output_dir, experiment=experiment)
+        end_time_exp = datetime.now()
+        duration_exp = (end_time_exp - start_time_exp).total_seconds()
+        result['duration_seconds'] = duration_exp
         results.append(result)
-        print(f"Finished: {experiment['name']} (return_code={result['return_code']})")
+        print(f"Finished: {experiment['name']} (return_code={result['return_code']}, duration={duration_exp:.2f}s)")
+    end_time_all = datetime.now()
+    total_duration = (end_time_all - start_time_all).total_seconds()
+    print(f"\nAll experiments finished in {total_duration:.2f} seconds.")
 
     (output_dir / "summary.json").write_text(
         json.dumps(results, indent=2, ensure_ascii=False),

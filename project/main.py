@@ -16,7 +16,7 @@ from constants import (
     DEFAULT_SERVICE_PENALTY_WEIGHT,
     DEFAULT_SOLVER_MAX_ITER,
     DEFAULT_SOLVER_POP_SIZE,
-    HISTORY_WINDOW_DAYS,
+    HISTORY_WINDOW_WEEKS,
 )
 from data.dataset import get_dataloader
 from model.lstm import DemandPredictor
@@ -48,13 +48,14 @@ def main():
     parser.add_argument('--service_penalty_weight', type=float, default=DEFAULT_SERVICE_PENALTY_WEIGHT, help=f'PAO 训练时服务率惩罚项的权重 (default: {DEFAULT_SERVICE_PENALTY_WEIGHT})')
     parser.add_argument('--grad_clip_norm', type=float, default=DEFAULT_GRAD_CLIP_NORM, help=f'参数梯度裁剪阈值 (default: {DEFAULT_GRAD_CLIP_NORM})')
     parser.add_argument('--use_segmentation', action='store_true', help='是否启用 segmentation 特征（按 ADI/CV2 分类后嵌入模型）')
+    parser.add_argument('--subset_nrows', type=int, default=3049, help='用于快速调试，只加载前 N 个 SKU 数据，默认 3049 (约十分之一)')
     args = parser.parse_args()
 
     print("Initializing Project Components...")
     
-    # 检测运行设备: 优先使用 CUDA (NVIDIA GPU), 其次 MPS (Apple Silicon), 默认 CPU
-    device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
-    print(f"DEBUG: Using device: {device}")
+    # 检测运行设备: 强制降级使用 CPU，消除 PAO 架构中频繁的 CPU-GPU 张量拷贝通信开销
+    device = torch.device("cpu")
+    print(f"DEBUG: Using device: {device} (Forced for M2 Optimization)")
     
     # 1. 初始化 DataLoader
     # 使用固定历史窗口长度，保持数据预处理和模型定义一致。
@@ -64,15 +65,17 @@ def main():
         data_path=dataset_path,
         batch_size=DEFAULT_BATCH_SIZE,
         penalty_coef=args.penalty_coef,
-        seq_len=HISTORY_WINDOW_DAYS,
-        mode='train'
+        seq_len=HISTORY_WINDOW_WEEKS,
+        mode='train',
+        subset_nrows=args.subset_nrows
     )
     eval_dataloader = get_dataloader(
         data_path=dataset_path,
         batch_size=DEFAULT_BATCH_SIZE,
         penalty_coef=args.penalty_coef,
-        seq_len=HISTORY_WINDOW_DAYS,
-        mode='test'
+        seq_len=HISTORY_WINDOW_WEEKS,
+        mode='test',
+        subset_nrows=args.subset_nrows
     )
     print(f"DEBUG: Train DataLoader length: {len(dataloader)}")
     print(f"DEBUG: Eval DataLoader length: {len(eval_dataloader)}")
